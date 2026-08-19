@@ -26,6 +26,15 @@ migrate.log
 **/.env
 **/.env.*
 
+# Personal / local backup exports (never commit user donation JSON)
+*.backup.json
+*backup*.json
+**/exports/
+/backups/
+blood_donation_export*.json
+donation_export*.json
+enc_export*.json
+
 # The Python Python extension related
 __pycache__/
 

@@ -6,6 +6,7 @@ import 'services/donation_storage.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Initializes encrypted store (migrates plaintext prefs if needed) + notifications.
   await DonationStorage.initNotifications();
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(

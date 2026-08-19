@@ -1,4 +1,5 @@
-// Approximate volume per whole-blood donation: 1 pint ≈ 500 ml
+// Approximate volume per whole-blood donation: 1 pint ≈ 500 ml.
+// Prefer [DonationType.mlPerDonation] for type-aware UI; kept for callers/tests.
 const int kMlPerDonation = 500;
 
 const String kFeedbackEmail = 'ralvanos@protonmail.com';

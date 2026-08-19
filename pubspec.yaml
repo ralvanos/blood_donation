@@ -1,7 +1,7 @@
 name: blood_donation
 description: Android app to track blood donations with countdown to next eligible donation.
 publish_to: 'none'
-version: 1.0.0+1
+version: 2.0.0+2
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -17,6 +17,9 @@ dependencies:
   flutter_local_notifications: ^22.0.1
   timezone: ^0.11.1
   flutter_timezone: ^4.1.0
+  flutter_secure_storage: ^10.3.1
+  encrypt: ^5.0.3
+  crypto: ^3.0.7
 
 dev_dependencies:
   flutter_test:
