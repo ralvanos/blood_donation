@@ -1,4 +1,6 @@
 import 'donation_type.dart';
+import 'eligibility_matrix.dart';
+import 'typed_donation.dart';
 
 /// Scope for the Statistics screen dual mode.
 enum StatisticsScope {
@@ -80,7 +82,6 @@ class AllTypesStatistics {
 
   static AllTypesStatistics fromDonationsByType({
     required Map<DonationType, List<DateTime>> donationsByType,
-    Map<DonationType, int>? countdownDaysByType,
     DateTime? now,
   }) {
     var totalVisits = 0;
@@ -98,20 +99,18 @@ class AllTypesStatistics {
     DonationType? soonestType;
     final today = _dateOnly(now ?? DateTime.now());
 
-    if (countdownDaysByType != null) {
-      for (final type in DonationType.values) {
-        final dates = donationsByType[type];
-        if (dates == null || dates.isEmpty) continue;
-        final countdown =
-            countdownDaysByType[type] ?? type.defaultCountdownDays;
-        final last = dates.reduce((a, b) => a.isAfter(b) ? a : b);
-        final eligible = _dateOnly(last).add(Duration(days: countdown));
-        if (soonest == null || eligible.isBefore(soonest)) {
-          soonest = eligible;
-          soonestType = type;
-        }
+    final combined = <TypedDonation>[];
+    for (final type in DonationType.values) {
+      for (final date in donationsByType[type] ?? const <DateTime>[]) {
+        combined.add(TypedDonation(type: type, date: date));
       }
     }
+    final snapshot = EligibilityMatrix.evaluate(
+      donations: combined,
+      now: now,
+    );
+    soonest = snapshot.soonestEligible;
+    soonestType = snapshot.soonestType;
 
     // Surface "eligible now" as today when past due.
     if (soonest != null && soonest.isBefore(today)) {
@@ -163,18 +162,14 @@ Set<DonationType>? legendFromPrefs(String? raw) {
 }
 
 String legendToPrefs(Set<DonationType> visible) {
-  return DonationType.values
-      .where(visible.contains)
-      .map((t) => t.id)
-      .join(',');
+  return DonationType.values.where(visible.contains).map((t) => t.id).join(',');
 }
 
 /// Ascending cumulative series for a single type (x = visit index).
 List<({double x, double y, DateTime date})> thisTypeTrendSpots(
   List<DateTime> donations,
 ) {
-  final sorted = List<DateTime>.from(donations)
-    ..sort((a, b) => a.compareTo(b));
+  final sorted = List<DateTime>.from(donations)..sort((a, b) => a.compareTo(b));
   return [
     for (var i = 0; i < sorted.length; i++)
       (x: i.toDouble(), y: (i + 1).toDouble(), date: sorted[i]),

@@ -1,3 +1,4 @@
+import 'package:blood_donation/models/donation_arm.dart';
 import 'package:blood_donation/models/donation_type.dart';
 import 'package:blood_donation/models/export_schema.dart';
 import 'package:blood_donation/models/typed_donation.dart';
@@ -8,7 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-Future<void> _resetEncryptedStore([Map<String, Object> initial = const {}]) async {
+Future<void> _resetEncryptedStore(
+    [Map<String, Object> initial = const {}]) async {
   SharedPreferences.setMockInitialValues(Map<String, Object>.from(initial));
   final prefs = await SharedPreferences.getInstance();
   final store = EncryptedStore(
@@ -113,7 +115,8 @@ void main() {
       expect(DonationType.values.length, 4);
       expect(DonationType.platelet.id, 'platelet');
       expect(DonationType.platelet.donationsPrefsKey, 'donations_platelet');
-      expect(DonationType.platelet.countdownPrefsKey, 'countdown_days_platelet');
+      expect(
+          DonationType.platelet.countdownPrefsKey, 'countdown_days_platelet');
       expect(DonationType.platelet.defaultCountdownDays, 7);
       expect(DonationType.platelet.mlPerDonation, 250);
     });
@@ -173,8 +176,8 @@ void main() {
   });
 
   group('export schema', () {
-    test('current schema is v5', () {
-      expect(kExportSchemaVersion, 5);
+    test('current schema is v6', () {
+      expect(kExportSchemaVersion, 6);
     });
   });
 
@@ -193,10 +196,13 @@ void main() {
       });
 
       expect(result.success, isTrue);
-      final donations = result.data![DonationStorage.keyDonations] as List<String>;
+      final donations =
+          result.data![DonationStorage.keyDonations] as List<String>;
       expect(donations.length, 2);
-      expect(result.data!.containsKey(DonationStorage.keyDonationsPlasma), isFalse);
-      expect(result.data!.containsKey(DonationStorage.keyDonationsPlatelet), isFalse);
+      expect(result.data!.containsKey(DonationStorage.keyDonationsPlasma),
+          isFalse);
+      expect(result.data!.containsKey(DonationStorage.keyDonationsPlatelet),
+          isFalse);
     });
 
     test('accepts schema v2 with three series (no platelet key)', () {
@@ -219,7 +225,8 @@ void main() {
         (result.data![DonationStorage.keyDonationsPlasma] as List).length,
         1,
       );
-      expect(result.data!.containsKey(DonationStorage.keyDonationsPlatelet), isFalse);
+      expect(result.data!.containsKey(DonationStorage.keyDonationsPlatelet),
+          isFalse);
     });
 
     test('accepts schema v3 with all four series', () {
@@ -276,6 +283,24 @@ void main() {
       expect(result.data![DonationStorage.keyDonorNumber], 'V5-ID');
     });
 
+    test('accepts schema v6 with mixed ISO strings and arm objects', () {
+      final result = DonationStorage.validateImportMap({
+        'schema_version': 6,
+        DonationStorage.keyDonations: [
+          {'date': '2024-06-01T00:00:00.000', 'arm': 'L'},
+          '2024-01-15T00:00:00.000',
+        ],
+        DonationStorage.keyCountdownDays: 56,
+      });
+
+      expect(result.success, isTrue);
+      final donations =
+          result.data![DonationStorage.keyDonations] as List<String>;
+      expect(donations.length, 2);
+      expect(donations.first, contains('"arm":"L"'));
+      expect(donations.last, startsWith('2024-01-15'));
+    });
+
     test('accepts empty donor_number string', () {
       final result = DonationStorage.validateImportMap({
         'schema_version': 4,
@@ -312,7 +337,8 @@ void main() {
       });
 
       expect(result.success, isTrue);
-      expect(result.data![DonationStorage.keyActiveDonationType], 'whole_blood');
+      expect(
+          result.data![DonationStorage.keyActiveDonationType], 'whole_blood');
     });
 
     test('rejects newer schema version', () {
@@ -486,6 +512,53 @@ void main() {
         isEmpty,
       );
     });
+
+    test('keeps arm JSON when merging with a plain ISO duplicate', () {
+      final result = DonationStorage.dedupeDonationStrings([
+        '2024-03-10T08:00:00.000',
+        '{"date":"2024-03-10T00:00:00.000","arm":"R"}',
+      ]);
+      expect(result.length, 1);
+      expect(result.single, contains('"arm":"R"'));
+    });
+  });
+
+  group('DonationArm', () {
+    test('parses L / R / both aliases', () {
+      expect(DonationArm.tryFromId('L'), DonationArm.left);
+      expect(DonationArm.tryFromId('r'), DonationArm.right);
+      expect(DonationArm.tryFromId('both'), DonationArm.both);
+      expect(DonationArm.tryFromId('dual'), DonationArm.both);
+      expect(DonationArm.tryFromId('nope'), isNull);
+    });
+
+    test('opposite is the other single-needle arm', () {
+      expect(DonationArm.left.opposite, DonationArm.right);
+      expect(DonationArm.right.opposite, DonationArm.left);
+      expect(DonationArm.both.opposite, isNull);
+    });
+  });
+
+  group('donation entry parse', () {
+    test('parses ISO, JSON string, and map', () {
+      final iso = DonationStorage.tryParseDonationValue(
+        '2024-03-10T00:00:00.000',
+      );
+      expect(iso?.date, DateTime(2024, 3, 10));
+      expect(iso?.arm, isNull);
+
+      final json = DonationStorage.tryParseDonationValue(
+        '{"date":"2024-03-10T00:00:00.000","arm":"L"}',
+      );
+      expect(json?.arm, DonationArm.left);
+
+      final map = DonationStorage.tryParseDonationValue({
+        'date': '2024-03-11T00:00:00.000',
+        'arm': 'both',
+      });
+      expect(map?.date, DateTime(2024, 3, 11));
+      expect(map?.arm, DonationArm.both);
+    });
   });
 
   group('encrypted-store-backed helpers', () {
@@ -543,7 +616,7 @@ void main() {
       expect(combined.first.date, DateTime(2024, 3, 1));
     });
 
-    test('getEligibilityOverview respects per-type countdown', () async {
+    test('getEligibilityOverview uses the cross-type matrix', () async {
       await DonationStorage.applyImport({
         DonationStorage.keyDonations: ['2024-01-01T00:00:00.000'],
         DonationStorage.keyDonationsPlasma: <String>[],
@@ -562,14 +635,21 @@ void main() {
       final wb = rows.firstWhere((r) => r.type == DonationType.wholeBlood);
       expect(wb.hasDonations, isTrue);
       expect(wb.eligibleNow, isTrue);
-      expect(wb.nextEligible, DateTime(2024, 2, 26));
+      // Last visit is platelets on Jun 1 (7-day wait) — later than WB's own Feb 26.
+      expect(wb.nextEligible, DateTime(2024, 6, 8));
 
       final plasma = rows.firstWhere((r) => r.type == DonationType.plasma);
       expect(plasma.hasDonations, isFalse);
+      expect(plasma.nextEligible, DateTime(2024, 6, 8));
+      expect(plasma.eligibleNow, isTrue);
 
       final plt = rows.firstWhere((r) => r.type == DonationType.platelet);
       expect(plt.eligibleNow, isTrue);
       expect(plt.nextEligible, DateTime(2024, 6, 8));
+
+      final dr = rows.firstWhere((r) => r.type == DonationType.doubleRed);
+      expect(dr.eligibleNow, isTrue);
+      expect(dr.nextEligible, DateTime(2024, 6, 8));
     });
 
     test('journey hint shows for 1–2 whole blood donations', () async {
@@ -596,6 +676,113 @@ void main() {
 
       await DonationStorage.setJourneyHintDoubleRedDismissed(true);
       expect(await DonationStorage.shouldShowDoubleRedJourneyHint(), isFalse);
+    });
+
+    test('addDonation stores optional arm and updateDonationArm edits it',
+        () async {
+      await DonationStorage.addDonation(
+        DateTime(2024, 4, 1),
+        type: DonationType.wholeBlood,
+        arm: DonationArm.right,
+      );
+      await DonationStorage.addDonation(
+        DateTime(2024, 2, 1),
+        type: DonationType.wholeBlood,
+      );
+
+      final records = await DonationStorage.getDonationRecords(
+        DonationType.wholeBlood,
+      );
+      expect(records.length, 2);
+      expect(records.first.date, DateTime(2024, 4, 1));
+      expect(records.first.arm, DonationArm.right);
+      expect(records.last.arm, isNull);
+
+      await DonationStorage.updateDonationArm(
+        date: DateTime(2024, 2, 1),
+        type: DonationType.wholeBlood,
+        arm: DonationArm.left,
+      );
+      final updated = await DonationStorage.getDonationRecords(
+        DonationType.wholeBlood,
+      );
+      expect(updated.last.arm, DonationArm.left);
+      expect(
+        await DonationStorage.lastTaggedSingleArm(DonationType.wholeBlood),
+        DonationArm.right,
+      );
+
+      await DonationStorage.updateDonationArm(
+        date: DateTime(2024, 4, 1),
+        type: DonationType.wholeBlood,
+        arm: null,
+      );
+      expect(
+        await DonationStorage.lastTaggedSingleArm(DonationType.wholeBlood),
+        DonationArm.left,
+      );
+    });
+
+    test('removeDonation works for JSON-encoded arm entries', () async {
+      await DonationStorage.addDonation(
+        DateTime(2024, 5, 1),
+        type: DonationType.plasma,
+        arm: DonationArm.left,
+      );
+      await DonationStorage.removeDonation(
+        DateTime(2024, 5, 1),
+        DonationType.plasma,
+      );
+      expect(await DonationStorage.getDonations(DonationType.plasma), isEmpty);
+    });
+
+    test('getCombinedDonations includes arm tags', () async {
+      await DonationStorage.addDonation(
+        DateTime(2024, 6, 1),
+        type: DonationType.platelet,
+        arm: DonationArm.both,
+      );
+      final combined = await DonationStorage.getCombinedDonations();
+      expect(combined.single.arm, DonationArm.both);
+    });
+
+    test('applyImport restores v6 mixed ISO and arm objects', () async {
+      await DonationStorage.applyImport({
+        DonationStorage.keyDonations: [
+          {'date': '2024-04-10T00:00:00.000', 'arm': 'R'},
+          '2024-01-10T00:00:00.000',
+        ],
+        DonationStorage.keyDonationsPlasma: <String>[],
+        DonationStorage.keyDonationsPlatelet: [
+          {'date': '2024-03-01T00:00:00.000', 'arm': 'both'},
+        ],
+        DonationStorage.keyDonationsDoubleRed: <String>[],
+      });
+
+      final wb = await DonationStorage.getDonationRecords(
+        DonationType.wholeBlood,
+      );
+      expect(wb.first.arm, DonationArm.right);
+      expect(wb.last.arm, isNull);
+
+      final plt = await DonationStorage.getDonationRecords(
+        DonationType.platelet,
+      );
+      expect(plt.single.arm, DonationArm.both);
+    });
+
+    test('buildExportMap emits v6 objects for tagged donations', () async {
+      await DonationStorage.addDonation(
+        DateTime(2024, 7, 4),
+        type: DonationType.doubleRed,
+        arm: DonationArm.left,
+      );
+      final exported = await DonationStorage.buildExportMap();
+      expect(exported['schema_version'], 6);
+      final list = exported[DonationStorage.keyDonationsDoubleRed] as List;
+      expect(list, isNotEmpty);
+      expect(list.first, isA<Map>());
+      expect((list.first as Map)['arm'], 'L');
     });
   });
 }

@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../models/donation_type.dart';
 import '../models/typed_donation.dart';
 import '../services/donation_storage.dart';
+import '../widgets/donation_arm_picker.dart';
 
 /// Donation history with an **All** combined timeline plus per-type filters.
 ///
@@ -56,7 +57,8 @@ class _DonationHistoryScreenState extends State<DonationHistoryScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1A1A1A),
-        title: const Text('Remove donation?', style: TextStyle(color: Colors.white)),
+        title: const Text('Remove donation?',
+            style: TextStyle(color: Colors.white)),
         content: Text(
           'Remove ${entry.type.displayName.toLowerCase()} donation on ${DateFormat.yMMMd().format(entry.date)}?',
           style: TextStyle(color: Colors.white.withValues(alpha: 0.8)),
@@ -82,6 +84,85 @@ class _DonationHistoryScreenState extends State<DonationHistoryScreen> {
     return true;
   }
 
+  Future<void> _showRowActions(TypedDonation entry) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A1A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: Icon(Icons.edit_outlined, color: entry.type.accent),
+                title: Text(
+                  entry.arm == null ? 'Tag arm' : 'Change arm tag',
+                  style: const TextStyle(color: Colors.white),
+                ),
+                onTap: () => Navigator.pop(ctx, 'arm'),
+              ),
+              ListTile(
+                leading: Icon(Icons.delete_outline_rounded,
+                    color: entry.type.accent),
+                title: const Text('Remove donation',
+                    style: TextStyle(color: Colors.white)),
+                onTap: () => Navigator.pop(ctx, 'remove'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (!mounted || action == null) return;
+    if (action == 'arm') {
+      await _editArm(entry);
+    } else if (action == 'remove') {
+      await _confirmDeleteDonation(entry);
+    }
+  }
+
+  Future<void> _editArm(TypedDonation entry) async {
+    final lastSingle = await DonationStorage.lastTaggedSingleArm(entry.type);
+    if (!mounted) return;
+    final pick = await showDonationArmPicker(
+      context: context,
+      type: entry.type,
+      accent: entry.type.accent,
+      current: entry.arm,
+      lastSingleArm: lastSingle,
+      allowClear: entry.arm != null,
+    );
+    if (pick == null || pick.skipped || !mounted) return;
+
+    final next = pick.cleared ? null : pick.arm;
+    if (next == entry.arm) return;
+
+    await DonationStorage.updateDonationArm(
+      date: entry.date,
+      type: entry.type,
+      arm: next,
+    );
+    if (!mounted) return;
+    _hasChanged = true;
+    await _load();
+  }
+
+  String? get _armSequence {
+    if (_filter == null) return null;
+    final tagged = _visible;
+    if (tagged.isEmpty) return null;
+    if (tagged.every((e) => e.arm == null)) return null;
+    final recent = tagged.take(8).toList();
+    final parts = [
+      for (final e in recent) e.arm?.tag ?? '—',
+    ];
+    final suffix = tagged.length > 8 ? ' · …' : '';
+    return 'Newest first: ${parts.join(' · ')}$suffix';
+  }
+
   Color get _appBarAccent {
     final filter = _filter;
     return filter?.accent ?? const Color(0xFFD3180C);
@@ -105,8 +186,11 @@ class _DonationHistoryScreenState extends State<DonationHistoryScreen> {
           elevation: 0,
           iconTheme: const IconThemeData(color: Colors.white),
           title: Text(
-            _filter == null ? 'Donation history' : '${_filter!.displayName} history',
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+            _filter == null
+                ? 'Donation history'
+                : '${_filter!.displayName} history',
+            style: const TextStyle(
+                color: Colors.white, fontWeight: FontWeight.w600),
           ),
         ),
         body: Column(
@@ -136,6 +220,18 @@ class _DonationHistoryScreenState extends State<DonationHistoryScreen> {
                 ),
               ),
             ),
+            if (_armSequence != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+                child: Text(
+                  _armSequence!,
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.35,
+                    color: Colors.white.withValues(alpha: 0.55),
+                  ),
+                ),
+              ),
             Expanded(
               child: _loading
                   ? Center(child: CircularProgressIndicator(color: accent))
@@ -206,112 +302,145 @@ class _DonationHistoryScreenState extends State<DonationHistoryScreen> {
                                   horizontal: 24,
                                   vertical: 6,
                                 ),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 20,
-                                    vertical: 16,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF1A1A1A),
+                                child: Material(
+                                  color: Colors.transparent,
+                                  child: InkWell(
+                                    onTap: () => _editArm(entry),
                                     borderRadius: BorderRadius.circular(16),
-                                    border: Border.all(
-                                      color: showTypeTag
-                                          ? type.accent.withValues(alpha: 0.28)
-                                          : Colors.white.withValues(alpha: 0.06),
-                                    ),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Container(
-                                        width: 48,
-                                        height: 48,
-                                        decoration: BoxDecoration(
-                                          color: type.accent
-                                              .withValues(alpha: 0.2),
-                                          borderRadius:
-                                              BorderRadius.circular(12),
-                                        ),
-                                        child: Icon(
-                                          type.icon,
-                                          color: type.accent,
-                                          size: 26,
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 20,
+                                        vertical: 16,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF1A1A1A),
+                                        borderRadius: BorderRadius.circular(16),
+                                        border: Border.all(
+                                          color: showTypeTag
+                                              ? type.accent
+                                                  .withValues(alpha: 0.28)
+                                              : Colors.white
+                                                  .withValues(alpha: 0.06),
                                         ),
                                       ),
-                                      const SizedBox(width: 16),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            if (showTypeTag) ...[
-                                              Container(
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                  horizontal: 8,
-                                                  vertical: 2,
-                                                ),
-                                                decoration: BoxDecoration(
-                                                  color: type.accent
-                                                      .withValues(alpha: 0.18),
-                                                  borderRadius:
-                                                      BorderRadius.circular(8),
-                                                  border: Border.all(
-                                                    color: type.accent
-                                                        .withValues(alpha: 0.45),
+                                      child: Row(
+                                        children: [
+                                          Container(
+                                            width: 48,
+                                            height: 48,
+                                            decoration: BoxDecoration(
+                                              color: type.accent
+                                                  .withValues(alpha: 0.2),
+                                              borderRadius:
+                                                  BorderRadius.circular(12),
+                                            ),
+                                            child: Icon(
+                                              type.icon,
+                                              color: type.accent,
+                                              size: 26,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 16),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                if (showTypeTag) ...[
+                                                  Container(
+                                                    padding: const EdgeInsets
+                                                        .symmetric(
+                                                      horizontal: 8,
+                                                      vertical: 2,
+                                                    ),
+                                                    decoration: BoxDecoration(
+                                                      color: type.accent
+                                                          .withValues(
+                                                              alpha: 0.18),
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                              8),
+                                                      border: Border.all(
+                                                        color: type.accent
+                                                            .withValues(
+                                                                alpha: 0.45),
+                                                      ),
+                                                    ),
+                                                    child: Text(
+                                                      type.shortLabel,
+                                                      style: TextStyle(
+                                                        fontSize: 11,
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                        color:
+                                                            type.accentIsLight
+                                                                ? type.onAccent
+                                                                : type.accent,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                  const SizedBox(height: 6),
+                                                ],
+                                                Text(
+                                                  DateFormat('EEEE, MMM d')
+                                                      .format(date),
+                                                  style: const TextStyle(
+                                                    fontSize: 16,
+                                                    fontWeight: FontWeight.w600,
+                                                    color: Colors.white,
                                                   ),
                                                 ),
-                                                child: Text(
-                                                  type.shortLabel,
+                                                Text(
+                                                  DateFormat.y().format(date),
                                                   style: TextStyle(
-                                                    fontSize: 11,
-                                                    fontWeight: FontWeight.w700,
-                                                    color: type.accentIsLight
+                                                    fontSize: 13,
+                                                    color: Colors.white
+                                                        .withValues(alpha: 0.5),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 4),
+                                                Text(
+                                                  '1 ${type.volumeUnitLabel}',
+                                                  style: TextStyle(
+                                                    fontSize: 12,
+                                                    color: Colors.white
+                                                        .withValues(alpha: 0.7),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 6),
+                                                if (entry.arm != null)
+                                                  ArmTag(
+                                                    arm: entry.arm!,
+                                                    accent: type.accent,
+                                                    onAccent: type.accentIsLight
                                                         ? type.onAccent
                                                         : type.accent,
+                                                  )
+                                                else
+                                                  Text(
+                                                    'Tap to tag arm',
+                                                    style: TextStyle(
+                                                      fontSize: 12,
+                                                      color: Colors.white
+                                                          .withValues(
+                                                              alpha: 0.45),
+                                                    ),
                                                   ),
-                                                ),
-                                              ),
-                                              const SizedBox(height: 6),
-                                            ],
-                                            Text(
-                                              DateFormat('EEEE, MMM d')
-                                                  .format(date),
-                                              style: const TextStyle(
-                                                fontSize: 16,
-                                                fontWeight: FontWeight.w600,
-                                                color: Colors.white,
-                                              ),
+                                              ],
                                             ),
-                                            Text(
-                                              DateFormat.y().format(date),
-                                              style: TextStyle(
-                                                fontSize: 13,
-                                                color: Colors.white
-                                                    .withValues(alpha: 0.5),
-                                              ),
+                                          ),
+                                          IconButton(
+                                            onPressed: () =>
+                                                _showRowActions(entry),
+                                            icon: Icon(
+                                              Icons.more_horiz,
+                                              color: Colors.white
+                                                  .withValues(alpha: 0.5),
                                             ),
-                                            const SizedBox(height: 4),
-                                            Text(
-                                              '1 ${type.volumeUnitLabel}',
-                                              style: TextStyle(
-                                                fontSize: 12,
-                                                color: Colors.white
-                                                    .withValues(alpha: 0.7),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
+                                          ),
+                                        ],
                                       ),
-                                      IconButton(
-                                        onPressed: () =>
-                                            _confirmDeleteDonation(entry),
-                                        icon: Icon(
-                                          Icons.more_horiz,
-                                          color: Colors.white
-                                              .withValues(alpha: 0.5),
-                                        ),
-                                      ),
-                                    ],
+                                    ),
                                   ),
                                 ),
                               ),
