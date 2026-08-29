@@ -12,7 +12,6 @@ class StatisticsScreen extends StatefulWidget {
     super.key,
     required this.donationType,
     required this.donationsByType,
-    this.countdownDaysByType,
   });
 
   /// Active Home donation type (scopes “This type” mode).
@@ -20,9 +19,6 @@ class StatisticsScreen extends StatefulWidget {
 
   /// All four series (may be empty lists).
   final Map<DonationType, List<DateTime>> donationsByType;
-
-  /// Per-type countdown for optional “next eligible” in All types mode.
-  final Map<DonationType, int>? countdownDaysByType;
 
   @override
   State<StatisticsScreen> createState() => _StatisticsScreenState();
@@ -123,7 +119,6 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
             else
               _AllTypesBody(
                 donationsByType: widget.donationsByType,
-                countdownDaysByType: widget.countdownDaysByType,
                 legendVisible: _legendVisible,
                 onToggleLegend: _toggleLegend,
                 prefsReady: _prefsReady,
@@ -352,14 +347,12 @@ class _ThisTypeBody extends StatelessWidget {
 class _AllTypesBody extends StatelessWidget {
   const _AllTypesBody({
     required this.donationsByType,
-    required this.countdownDaysByType,
     required this.legendVisible,
     required this.onToggleLegend,
     required this.prefsReady,
   });
 
   final Map<DonationType, List<DateTime>> donationsByType;
-  final Map<DonationType, int>? countdownDaysByType;
   final Set<DonationType> legendVisible;
   final ValueChanged<DonationType> onToggleLegend;
   final bool prefsReady;
@@ -368,7 +361,6 @@ class _AllTypesBody extends StatelessWidget {
   Widget build(BuildContext context) {
     final stats = AllTypesStatistics.fromDonationsByType(
       donationsByType: donationsByType,
-      countdownDaysByType: countdownDaysByType,
     );
     final chart = allTypesTrendSeries(
       donationsByType: donationsByType,

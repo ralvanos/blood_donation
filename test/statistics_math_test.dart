@@ -41,6 +41,7 @@ void main() {
 
       final stats = AllTypesStatistics.fromDonationsByType(
         donationsByType: byType,
+        now: DateTime(2024, 4, 1),
       );
 
       expect(stats.totalVisits, 3);
@@ -51,30 +52,23 @@ void main() {
       );
       expect(stats.typesUsed, 2);
       expect(stats.typesUsedLabel, '2 of 4');
-      expect(stats.soonestEligible, isNull);
     });
 
     test('finds soonest next eligibility across types', () {
       final byType = {
-        // WB: Jan 1 + 56 → Feb 26
+        // WB: Jan 1 + 56 → Feb 26; platelets from that visit open Jan 8.
         DonationType.wholeBlood: [DateTime(2024, 1, 1)],
-        // Plasma: Jan 20 + 28 → Feb 17 (sooner)
         DonationType.plasma: [DateTime(2024, 1, 20)],
         DonationType.platelet: <DateTime>[],
         DonationType.doubleRed: <DateTime>[],
       };
-      final countdowns = {
-        for (final t in DonationType.values) t: t.defaultCountdownDays,
-      };
-
       final stats = AllTypesStatistics.fromDonationsByType(
         donationsByType: byType,
-        countdownDaysByType: countdowns,
         now: DateTime(2024, 2, 1),
       );
 
-      expect(stats.soonestType, DonationType.plasma);
-      expect(stats.soonestEligible, DateTime(2024, 2, 17));
+      expect(stats.soonestType, DonationType.platelet);
+      expect(stats.soonestEligible, DateTime(2024, 2, 1));
     });
 
     test('clamps past-due eligibility to today', () {
@@ -84,18 +78,13 @@ void main() {
         DonationType.platelet: <DateTime>[],
         DonationType.doubleRed: <DateTime>[],
       };
-      final countdowns = {
-        for (final t in DonationType.values) t: t.defaultCountdownDays,
-      };
-
       final now = DateTime(2024, 6, 15);
       final stats = AllTypesStatistics.fromDonationsByType(
         donationsByType: byType,
-        countdownDaysByType: countdowns,
         now: now,
       );
 
-      expect(stats.soonestType, DonationType.plasma);
+      expect(stats.soonestType, DonationType.platelet);
       expect(stats.soonestEligible, DateTime(2024, 6, 15));
     });
   });

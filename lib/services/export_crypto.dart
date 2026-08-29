@@ -19,7 +19,7 @@ import 'package:flutter/foundation.dart';
 ///   "ciphertext": "<base64>"
 /// }
 /// ```
-/// The ciphertext decrypts to the same plaintext export JSON (schema v1–v5).
+/// The ciphertext decrypts to the same plaintext export JSON (schema v1–v6).
 class ExportCrypto {
   ExportCrypto._();
 
@@ -166,7 +166,8 @@ class ExportCrypto {
 
     for (var block = 1; block <= blocks; block++) {
       final blockBytes = ByteData(4)..setUint32(0, block, Endian.big);
-      var u = _hmacSha256(password, [...salt, ...blockBytes.buffer.asUint8List()]);
+      var u =
+          _hmacSha256(password, [...salt, ...blockBytes.buffer.asUint8List()]);
       var t = Uint8List.fromList(u);
 
       for (var i = 1; i < iterations; i++) {

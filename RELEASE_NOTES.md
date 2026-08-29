@@ -1,23 +1,21 @@
-# blood_donation 2.0.0
+# blood_donation 2.1.0
 
-Major update from 1.0.0: multi-type donation tracking, on-device encrypted storage, optional PIN lock, and export schema v5.
+Arm tags for needle access (L / R / Both) and export schema v6. Builds on 2.0.0 (multi-type tracking, encrypted storage, PIN lock).
 
 ## Highlights
 
-- **Four donation types** — Whole Blood, Plasma, Platelets, and Double Red, each with its own history, countdown, and volume totals
-- **On-device encryption** — Donation history, donor number, and settings encrypted at rest (AES-CBC); DEK in Android Keystore via `flutter_secure_storage`; one-time migration from plaintext SharedPreferences
-- **Optional PIN lock** — 4–6 digit PIN; lock on open; auto-lock Immediate / 30s / 1m / 5m
-- **PIN-protected backups** — Export as plaintext JSON (schema v5) or `enc_export_v1` (PBKDF2 + AES-CBC); import accepts v1–v5 and encrypted wrappers
-- **Eligibility overview** — Next eligible date for every type on one screen
-- **Combined history** — Timeline with All + per-type filters
-- **Statistics** — This type vs All types (multi-line chart, legend toggles, cross-type totals)
-- **Smarter reminders** — Soonest eligibility across types; notification text names the type
-- **Donor extras** — Optional donor number, Learn content, soft journey labels / Double Red tip
+- **Arm tags** — When you add a donation, optionally mark **L**, **R**, or **Both** (typical for dual-needle platelets). Skip with **Not sure**.
+- **Backfill** — Tap any History row to tag or change older donations you remember.
+- **Alternation hint** — After a tagged single-needle donation, Home and the picker suggest the other arm next.
+- **Arm sequence** — Filter History by type to see a newest-first L / R line (untagged days show as —).
+- **Eligibility matrix** — Next dates for every type from your last donation (plus any older visit that still blocks a product). After whole blood: 56 / 56 / 7 / 56 days; after plasma: 28 / 28 / 7 / 28; after platelets: 7 across; after double red: 112 across. Rolling yearly caps: 6 / 13 / 24 / 3. Wait days are locked to this table (the Settings interval stepper is gone).
+- **Calendar** — Month view on Eligibility overview: donation dots, first-eligible outlines, tap a day to see what you could donate.
 
 ## Upgrade notes
 
-- Existing 1.x installs migrate donation data and settings into encrypted storage on first launch after upgrade
-- Older plaintext backup JSON (schema v1–v4) still imports; wrong PIN on encrypted import does not wipe on-device data
+- Existing donations stay date-only until you tag them
+- Older plaintext backups (schema v1–v5) still import; wrong PIN on encrypted import does not wipe on-device data
+- Android `versionCode` is **4** (`2.1.0+4`) so sideload upgrades from earlier 2.1.0 test APKs (`+3`) install cleanly
 - Release APKs are signed with the project keystore (not in git) — attach `app-release.apk` to the GitHub Release, do not commit it
 
 ## Build

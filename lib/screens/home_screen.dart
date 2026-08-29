@@ -5,10 +5,14 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../constants.dart';
 import '../content/donation_type_info.dart';
+import '../models/donation_arm.dart';
 import '../models/donation_type.dart';
+import '../models/eligibility_matrix.dart';
+import '../models/typed_donation.dart';
 import '../services/auto_lock_policy.dart';
 import '../services/donation_storage.dart';
 import '../services/pin_service.dart';
+import '../widgets/donation_arm_picker.dart';
 import '../widgets/stat_card.dart';
 import 'donation_history.dart';
 import 'eligibility_overview_screen.dart';
@@ -25,10 +29,10 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+class _HomeScreenState extends State<HomeScreen>
+    with SingleTickerProviderStateMixin {
   List<DateTime> _donations = [];
   DonationType _activeType = DonationType.wholeBlood;
-  int _countdownDays = 56;
   bool _loading = true;
   late AnimationController _pulseController;
   bool _reminderEnabled = false;
@@ -36,6 +40,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   String _donorNumber = '';
   bool _showDoubleRedHint = false;
   int _wholeBloodCount = 0;
+  DonationArm? _lastSingleArm;
+  EligibilitySnapshot? _eligibility;
 
   Color get _accent => _activeType.accent;
   Color get _accentSecondary => _activeType.accentSecondary;
@@ -59,29 +65,38 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   Future<void> _load() async {
     final activeType = await DonationStorage.getActiveDonationType();
     final donations = await DonationStorage.getDonations(activeType);
-    final days = await DonationStorage.getCountdownDays(activeType);
     final reminderEnabled = await DonationStorage.getReminderEnabled();
     final reminderDaysBefore = await DonationStorage.getReminderDaysBefore();
     final donorNumber = await DonationStorage.getDonorNumber();
     final showHint = await DonationStorage.shouldShowDoubleRedJourneyHint();
-    final wbDonations = await DonationStorage.getDonations(DonationType.wholeBlood);
-    final catchUp = DonationStorage.computeCatchUp(
-      donations: donations,
-      countdownDays: days,
-      reminderEnabled: reminderEnabled,
-      reminderDaysBefore: reminderDaysBefore,
-      now: DateTime.now(),
-    );
+    final wbDonations =
+        await DonationStorage.getDonations(DonationType.wholeBlood);
+    final lastSingleArm = await DonationStorage.lastTaggedSingleArm(activeType);
+    final eligibility = await DonationStorage.getEligibilitySnapshot();
+    final activeRow = eligibility.row(activeType);
+    final catchUp = activeRow.nextEligible == null
+        ? const EligibilityCatchUp(kind: EligibilityCatchUpKind.none)
+        : DonationStorage.computeCatchUp(
+            donations: [
+              activeRow.nextEligible!
+                  .subtract(Duration(days: activeRow.appliedWaitDays)),
+            ],
+            countdownDays: activeRow.appliedWaitDays,
+            reminderEnabled: reminderEnabled,
+            reminderDaysBefore: reminderDaysBefore,
+            now: DateTime.now(),
+          );
     if (mounted) {
       setState(() {
         _activeType = activeType;
         _donations = donations;
-        _countdownDays = days;
         _reminderEnabled = reminderEnabled;
         _reminderDaysBefore = reminderDaysBefore;
         _donorNumber = donorNumber;
         _showDoubleRedHint = showHint;
         _wholeBloodCount = wbDonations.length;
+        _lastSingleArm = lastSingleArm;
+        _eligibility = eligibility;
         _loading = false;
       });
       _maybeShowNotificationPermissionHint(reminderEnabled);
@@ -93,16 +108,17 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     if (type == _activeType) return;
     await DonationStorage.setActiveDonationType(type);
     final donations = await DonationStorage.getDonations(type);
-    final days = await DonationStorage.getCountdownDays(type);
+    final lastSingleArm = await DonationStorage.lastTaggedSingleArm(type);
     if (!mounted) return;
     setState(() {
       _activeType = type;
       _donations = donations;
-      _countdownDays = days;
+      _lastSingleArm = lastSingleArm;
     });
   }
 
-  void _maybeShowCatchUpSnackBar(EligibilityCatchUp catchUp, bool remindersEnabled) {
+  void _maybeShowCatchUpSnackBar(
+      EligibilityCatchUp catchUp, bool remindersEnabled) {
     if (!remindersEnabled) return;
 
     switch (catchUp.kind) {
@@ -117,11 +133,13 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         );
       case EligibilityCatchUpKind.missedAdvanceReminder:
         final eligible = catchUp.eligibleDate!;
-        final daysUntil = eligible.difference(DateTime(
-          DateTime.now().year,
-          DateTime.now().month,
-          DateTime.now().day,
-        )).inDays;
+        final daysUntil = eligible
+            .difference(DateTime(
+              DateTime.now().year,
+              DateTime.now().month,
+              DateTime.now().day,
+            ))
+            .inDays;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -151,28 +169,23 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     );
   }
 
-  DateTime? get _lastDonation => _donations.isEmpty ? null : _donations.first;
+  bool get _hasHistory => _eligibility?.hasHistory ?? false;
 
-  DateTime? get _nextEligible {
-    final last = _lastDonation;
-    if (last == null) return null;
-    return last.add(Duration(days: _countdownDays));
-  }
+  TypeEligibility? get _activeEligibility => _eligibility?.byType[_activeType];
 
-  int? get _daysUntilNext {
-    final next = _nextEligible;
-    if (next == null) return null;
-    final now = DateTime.now();
-    final diff = next.difference(DateTime(now.year, now.month, now.day));
-    return diff.inDays.clamp(0, 999);
-  }
+  DateTime? get _nextEligible => _activeEligibility?.nextEligible;
+
+  int? get _daysUntilNext => _activeEligibility?.daysUntil;
+
+  int get _appliedWaitDays =>
+      _activeEligibility?.appliedWaitDays ?? _activeType.defaultCountdownDays;
 
   double get _progressUntilNext {
     final daysUntil = _daysUntilNext;
     if (daysUntil == null) return 0;
-    if (_countdownDays <= 0) return 1;
-    final completedDays = _countdownDays - daysUntil;
-    return (completedDays / _countdownDays).clamp(0.0, 1.0);
+    if (_appliedWaitDays <= 0) return 1;
+    final completedDays = _appliedWaitDays - daysUntil;
+    return (completedDays / _appliedWaitDays).clamp(0.0, 1.0);
   }
 
   @override
@@ -181,7 +194,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       return Scaffold(
         backgroundColor: const Color(0xFF0D0D0D),
         body: Center(
-          child: CircularProgressIndicator(color: Theme.of(context).colorScheme.primary),
+          child: CircularProgressIndicator(
+              color: Theme.of(context).colorScheme.primary),
         ),
       );
     }
@@ -220,31 +234,36 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                               visualDensity: VisualDensity.compact,
                               tooltip: 'Donation history',
                               onPressed: _openHistory,
-                              icon: const Icon(Icons.history_rounded, color: Colors.white70),
+                              icon: const Icon(Icons.history_rounded,
+                                  color: Colors.white70),
                             ),
                             IconButton(
                               visualDensity: VisualDensity.compact,
                               tooltip: 'Eligibility overview',
                               onPressed: _openEligibilityOverview,
-                              icon: const Icon(Icons.event_available_outlined, color: Colors.white70),
+                              icon: const Icon(Icons.event_available_outlined,
+                                  color: Colors.white70),
                             ),
                             IconButton(
                               visualDensity: VisualDensity.compact,
                               tooltip: 'Statistics',
                               onPressed: _openStatistics,
-                              icon: const Icon(Icons.bar_chart_rounded, color: Colors.white70),
+                              icon: const Icon(Icons.bar_chart_rounded,
+                                  color: Colors.white70),
                             ),
                             IconButton(
                               visualDensity: VisualDensity.compact,
                               tooltip: 'Settings',
                               onPressed: () => _showSettings(context),
-                              icon: const Icon(Icons.settings_outlined, color: Colors.white70),
+                              icon: const Icon(Icons.settings_outlined,
+                                  color: Colors.white70),
                             ),
                             IconButton(
                               visualDensity: VisualDensity.compact,
                               tooltip: 'Feedback & support',
                               onPressed: _showFeedbackSupport,
-                              icon: const Icon(Icons.contact_support_outlined, color: Colors.white70),
+                              icon: const Icon(Icons.contact_support_outlined,
+                                  color: Colors.white70),
                             ),
                           ],
                         ),
@@ -444,7 +463,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     _showInfoSheet(info);
   }
 
-  void _showInfoSheet(DonationTypeInfo info, {IconData? icon, Color? iconColor}) {
+  void _showInfoSheet(DonationTypeInfo info,
+      {IconData? icon, Color? iconColor}) {
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFF1A1A1A),
@@ -596,14 +616,15 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           ),
           child: Row(
             children: [
-              Icon(Icons.event_available_outlined, color: _accentSecondary, size: 22),
+              Icon(Icons.event_available_outlined,
+                  color: _accentSecondary, size: 22),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'Eligibility overview',
+                      'Eligibility matrix & calendar',
                       style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
@@ -612,7 +633,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      'Next eligible date for every type',
+                      'Based on last donation — every type',
                       style: TextStyle(
                         fontSize: 12,
                         color: Colors.white.withValues(alpha: 0.55),
@@ -633,18 +654,19 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   }
 
   Widget _buildCountdownRing() {
-    final hasDonation = _lastDonation != null;
+    final hasHistory = _hasHistory;
     final daysUntil = _daysUntilNext;
-    final isReady = hasDonation && daysUntil == 0;
+    final isReady = hasHistory && daysUntil == 0;
     final String centerLabel;
     final String subLabel;
 
-    if (!hasDonation) {
+    if (!hasHistory) {
       centerLabel = 'No donations';
       subLabel = 'Add your first ${_activeType.displayName.toLowerCase()}';
     } else if (isReady) {
       centerLabel = 'Ready to donate';
-      subLabel = 'You can donate ${_activeType.displayName.toLowerCase()} today';
+      subLabel =
+          'You can donate ${_activeType.displayName.toLowerCase()} today';
     } else {
       centerLabel = '$daysUntil days';
       subLabel = 'until next ${_activeType.shortLabel.toLowerCase()}';
@@ -656,7 +678,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         child: TweenAnimationBuilder<double>(
           duration: const Duration(milliseconds: 800),
           curve: Curves.easeOutCubic,
-          tween: Tween<double>(begin: 0, end: hasDonation ? _progressUntilNext : 0),
+          tween:
+              Tween<double>(begin: 0, end: hasHistory ? _progressUntilNext : 0),
           builder: (context, value, _) {
             final Color ringColor = isReady ? const Color(0xFF4CAF50) : _accent;
             return SizedBox(
@@ -682,7 +705,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                       width: 200,
                       height: 200,
                       child: CircularProgressIndicator(
-                        value: hasDonation ? value : 0,
+                        value: hasHistory ? value : 0,
                         strokeWidth: 14,
                         backgroundColor: Colors.white.withValues(alpha: 0.06),
                         valueColor: AlwaysStoppedAnimation<Color>(ringColor),
@@ -749,10 +772,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       subtitle =
           'You have logged $fullGallons gallon-equivalent${fullGallons == 1 ? '' : 's'} of $product so far. Thank you for making a huge impact.';
     } else if (isExactQuart) {
-      final quartsText = fullQuarts.toStringAsFixed(fullQuarts == fullQuarts.roundToDouble() ? 0 : 1);
+      final quartsText = fullQuarts
+          .toStringAsFixed(fullQuarts == fullQuarts.roundToDouble() ? 0 : 1);
       color = _accentSecondary;
       title = 'Amazing milestone reached!';
-      subtitle = 'You have logged about $quartsText quart-equivalent${fullQuarts == 1 ? '' : 's'} of $product in total.';
+      subtitle =
+          'You have logged about $quartsText quart-equivalent${fullQuarts == 1 ? '' : 's'} of $product in total.';
     } else {
       final int unitsToNextQuart = (2 - (totalUnits % 2)) % 2;
       final int unitsToNextGallon = (8 - (totalUnits % 8)) % 8;
@@ -765,7 +790,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             'One more donation and you\'ll reach $nextGallons gallon-equivalent${nextGallons == 1 ? '' : 's'} of $product!';
       } else if (unitsToNextQuart == 1 && totalUnits >= 1) {
         final nextQuarts = (totalUnits + 1) / 2.0;
-        final quartsText = nextQuarts.toStringAsFixed(nextQuarts == nextQuarts.roundToDouble() ? 0 : 1);
+        final quartsText = nextQuarts
+            .toStringAsFixed(nextQuarts == nextQuarts.roundToDouble() ? 0 : 1);
         color = _accentSecondary;
         title = 'Almost at your next quart';
         subtitle =
@@ -817,9 +843,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   Widget _buildStatsCards() {
     final daysUntil = _daysUntilNext;
-    final hasDonation = _lastDonation != null;
-    final nextColor = daysUntil == 0 ? const Color(0xFF4CAF50) : _accentSecondary;
-    final daysDisplay = hasDonation ? '$daysUntil' : '—';
+    final hasHistory = _hasHistory;
+    final nextColor =
+        daysUntil == 0 ? const Color(0xFF4CAF50) : _accentSecondary;
+    final daysDisplay = hasHistory ? '${daysUntil ?? 0}' : '—';
 
     return Column(
       children: [
@@ -835,7 +862,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             ),
             const SizedBox(width: 16),
             Expanded(
-              child: hasDonation
+              child: hasHistory
                   ? AnimatedBuilder(
                       animation: _pulseController,
                       builder: (context, child) {
@@ -904,6 +931,28 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                   color: Colors.white,
                 ),
               ),
+              if (_activeEligibility?.blockingDonation != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  'After ${_activeEligibility!.blockingDonation!.type.displayName.toLowerCase()} '
+                  'on ${DateFormat('MMM d, y').format(_activeEligibility!.blockingDonation!.date)}',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.white.withValues(alpha: 0.65),
+                  ),
+                ),
+              ],
+              if (_lastSingleArm != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  'Last tagged arm: ${_lastSingleArm!.displayName}'
+                  '${_lastSingleArm!.opposite != null ? ' · consider ${_lastSingleArm!.opposite!.displayName} next' : ''}',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.white.withValues(alpha: 0.65),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -919,8 +968,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
     final int fullGallons = totalUnits ~/ 8;
     final int unitsInCurrentGallon = totalUnits % 8;
-    final double fill = totalUnits == 0 ? 0 : (unitsInCurrentGallon / 8).clamp(0.0, 1.0);
-    final double visualFill = (totalUnits > 0 && unitsInCurrentGallon == 0) ? 1.0 : fill;
+    final double fill =
+        totalUnits == 0 ? 0 : (unitsInCurrentGallon / 8).clamp(0.0, 1.0);
+    final double visualFill =
+        (totalUnits > 0 && unitsInCurrentGallon == 0) ? 1.0 : fill;
 
     final int totalMl = totalUnits * _activeType.mlPerDonation;
     final String totalMlText = NumberFormat.decimalPattern().format(totalMl);
@@ -952,11 +1003,15 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     ),
                     if (fullGallons > 0)
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 2),
                         decoration: BoxDecoration(
-                          color: const Color(0xFFFFC107).withValues(alpha: 0.15),
+                          color:
+                              const Color(0xFFFFC107).withValues(alpha: 0.15),
                           borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: const Color(0xFFFFC107).withValues(alpha: 0.4)),
+                          border: Border.all(
+                              color: const Color(0xFFFFC107)
+                                  .withValues(alpha: 0.4)),
                         ),
                         child: Text(
                           '$fullGallons GALLON${fullGallons == 1 ? '' : 'S'}',
@@ -1051,7 +1106,16 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       },
     );
     if (date != null) {
-      await DonationStorage.addDonation(date, _activeType);
+      if (!mounted) return;
+      final pick = await showDonationArmPicker(
+        context: context,
+        type: _activeType,
+        accent: _accent,
+        lastSingleArm: _lastSingleArm,
+      );
+      if (!mounted) return;
+      final arm = pick?.arm;
+      await DonationStorage.addDonation(date, type: _activeType, arm: arm);
       _load();
     }
   }
@@ -1153,14 +1217,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   Future<void> _openStatistics() async {
     final byType = <DonationType, List<DateTime>>{};
-    final countdowns = <DonationType, int>{};
     for (final type in DonationType.values) {
       byType[type] = type == _activeType
           ? List<DateTime>.from(_donations)
           : await DonationStorage.getDonations(type);
-      countdowns[type] = type == _activeType
-          ? _countdownDays
-          : await DonationStorage.getCountdownDays(type);
     }
     if (!mounted) return;
     await Navigator.of(context).push(
@@ -1168,7 +1228,6 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         builder: (context) => StatisticsScreen(
           donationType: _activeType,
           donationsByType: byType,
-          countdownDaysByType: countdowns,
         ),
       ),
     );
@@ -1178,7 +1237,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(snackMessage), behavior: SnackBarBehavior.floating),
+      SnackBar(
+          content: Text(snackMessage), behavior: SnackBarBehavior.floating),
     );
   }
 
@@ -1188,30 +1248,40 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     try {
       final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
       if (!ok && mounted) {
-        _copyWithSnackBar(kFeedbackEmail, 'Email copied — paste it into your mail app');
+        _copyWithSnackBar(
+            kFeedbackEmail, 'Email copied — paste it into your mail app');
       }
     } catch (_) {
       if (mounted) {
-        _copyWithSnackBar(kFeedbackEmail, 'Email copied — paste it into your mail app');
+        _copyWithSnackBar(
+            kFeedbackEmail, 'Email copied — paste it into your mail app');
       }
     }
   }
 
   void _showFeedbackSupport() {
-    final muted = TextStyle(color: Colors.white.withValues(alpha: 0.72), fontSize: 13);
-    final addressStyle = TextStyle(color: Colors.white.withValues(alpha: 0.92), fontSize: 12, height: 1.35);
+    final muted =
+        TextStyle(color: Colors.white.withValues(alpha: 0.72), fontSize: 13);
+    final addressStyle = TextStyle(
+        color: Colors.white.withValues(alpha: 0.92),
+        fontSize: 12,
+        height: 1.35);
 
     showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1A1A1A),
-        title: const Text('Feedback & support', style: TextStyle(color: Colors.white)),
+        title: const Text('Feedback & support',
+            style: TextStyle(color: Colors.white)),
         content: SingleChildScrollView(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('Feedback', style: TextStyle(color: Colors.white.withValues(alpha: 0.9), fontWeight: FontWeight.w600)),
+              Text('Feedback',
+                  style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.9),
+                      fontWeight: FontWeight.w600)),
               const SizedBox(height: 6),
               Text(
                 'Questions, ideas, or bug reports are welcome.',
@@ -1232,45 +1302,67 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                       Navigator.pop(ctx);
                       _openFeedbackEmail();
                     },
-                    icon: Icon(Icons.mail_outline_rounded, size: 18, color: _accent),
-                    label: Text('Open in email app', style: TextStyle(color: _accent)),
+                    icon: Icon(Icons.mail_outline_rounded,
+                        size: 18, color: _accent),
+                    label: Text('Open in email app',
+                        style: TextStyle(color: _accent)),
                   ),
                   TextButton.icon(
-                    onPressed: () => _copyWithSnackBar(kFeedbackEmail, 'Email address copied'),
-                    icon: const Icon(Icons.copy_rounded, size: 18, color: Colors.white70),
-                    label: const Text('Copy email', style: TextStyle(color: Colors.white70)),
+                    onPressed: () => _copyWithSnackBar(
+                        kFeedbackEmail, 'Email address copied'),
+                    icon: const Icon(Icons.copy_rounded,
+                        size: 18, color: Colors.white70),
+                    label: const Text('Copy email',
+                        style: TextStyle(color: Colors.white70)),
                   ),
                 ],
               ),
               const SizedBox(height: 22),
-              Text('Support the app', style: TextStyle(color: Colors.white.withValues(alpha: 0.9), fontWeight: FontWeight.w600)),
+              Text('Support the app',
+                  style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.9),
+                      fontWeight: FontWeight.w600)),
               const SizedBox(height: 8),
               Text(
                 kSupportTheAppMessage,
                 style: muted,
               ),
               const SizedBox(height: 14),
-              Text('Bitcoin', style: TextStyle(color: Colors.white.withValues(alpha: 0.85), fontWeight: FontWeight.w500, fontSize: 13)),
+              Text('Bitcoin',
+                  style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.85),
+                      fontWeight: FontWeight.w500,
+                      fontSize: 13)),
               const SizedBox(height: 4),
               SelectableText(kDonateBtcAddress, style: addressStyle),
               Align(
                 alignment: Alignment.centerLeft,
                 child: TextButton.icon(
-                  onPressed: () => _copyWithSnackBar(kDonateBtcAddress, 'Bitcoin address copied'),
-                  icon: const Icon(Icons.copy_rounded, size: 18, color: Colors.white70),
-                  label: const Text('Copy Bitcoin address', style: TextStyle(color: Colors.white70)),
+                  onPressed: () => _copyWithSnackBar(
+                      kDonateBtcAddress, 'Bitcoin address copied'),
+                  icon: const Icon(Icons.copy_rounded,
+                      size: 18, color: Colors.white70),
+                  label: const Text('Copy Bitcoin address',
+                      style: TextStyle(color: Colors.white70)),
                 ),
               ),
               const SizedBox(height: 12),
-              Text('Monero', style: TextStyle(color: Colors.white.withValues(alpha: 0.85), fontWeight: FontWeight.w500, fontSize: 13)),
+              Text('Monero',
+                  style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.85),
+                      fontWeight: FontWeight.w500,
+                      fontSize: 13)),
               const SizedBox(height: 4),
               SelectableText(kDonateXmrAddress, style: addressStyle),
               Align(
                 alignment: Alignment.centerLeft,
                 child: TextButton.icon(
-                  onPressed: () => _copyWithSnackBar(kDonateXmrAddress, 'Monero address copied'),
-                  icon: const Icon(Icons.copy_rounded, size: 18, color: Colors.white70),
-                  label: const Text('Copy Monero address', style: TextStyle(color: Colors.white70)),
+                  onPressed: () => _copyWithSnackBar(
+                      kDonateXmrAddress, 'Monero address copied'),
+                  icon: const Icon(Icons.copy_rounded,
+                      size: 18, color: Colors.white70),
+                  label: const Text('Copy Monero address',
+                      style: TextStyle(color: Colors.white70)),
                 ),
               ),
             ],
@@ -1314,13 +1406,16 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1A1A1A),
-        title: const Text('Import backup?', style: TextStyle(color: Colors.white)),
+        title:
+            const Text('Import backup?', style: TextStyle(color: Colors.white)),
         content: Text(
           'This will replace your current donation data (all types) and settings with the backup file. This cannot be undone.',
           style: TextStyle(color: Colors.white.withValues(alpha: 0.8)),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
             child: Text('Import', style: TextStyle(color: _accent)),
@@ -1342,7 +1437,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     _load();
   }
 
-  Future<void> _runExport({required bool pinProtected, required BuildContext messengerContext}) async {
+  Future<void> _runExport(
+      {required bool pinProtected,
+      required BuildContext messengerContext}) async {
     String? passphrase;
     if (pinProtected) {
       passphrase = await PinDialogs.promptExportPassphrase(messengerContext);
@@ -1413,7 +1510,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       context: ctx,
       builder: (dialogCtx) => AlertDialog(
         backgroundColor: const Color(0xFF1A1A1A),
-        title: const Text('Export backup', style: TextStyle(color: Colors.white)),
+        title:
+            const Text('Export backup', style: TextStyle(color: Colors.white)),
         content: Text(
           'Choose how to save your backup file.',
           style: TextStyle(color: Colors.white.withValues(alpha: 0.8)),
@@ -1442,12 +1540,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   }
 
   void _showSettings(BuildContext context) async {
-    int tempDays = _countdownDays;
     bool tempReminderEnabled = _reminderEnabled;
     int tempReminderDaysBefore = _reminderDaysBefore;
     final donorController = TextEditingController(text: _donorNumber);
     final accent = _accent;
-    final type = _activeType;
     var pinEnabled = await PinService.instance.isEnabled();
     var autoLockSeconds = await DonationStorage.getAutoLockTimeoutSeconds();
 
@@ -1459,7 +1555,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         builder: (ctx, setDialogState) {
           return AlertDialog(
             backgroundColor: const Color(0xFF1A1A1A),
-            title: const Text('Settings', style: TextStyle(color: Colors.white)),
+            title:
+                const Text('Settings', style: TextStyle(color: Colors.white)),
             content: ScrollConfiguration(
               behavior: const ScrollBehavior().copyWith(scrollbars: false),
               child: SingleChildScrollView(
@@ -1531,45 +1628,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                           );
                           setDialogState(() {});
                         },
-                        child: Text('Save donor number', style: TextStyle(color: accent)),
+                        child: Text('Save donor number',
+                            style: TextStyle(color: accent)),
                       ),
                     ),
                     const SizedBox(height: 16),
-                    Text(
-                      type.settingsIntervalBlurb,
-                      style: TextStyle(color: Colors.white.withValues(alpha: 0.7), fontSize: 13),
-                    ),
-                    const SizedBox(height: 20),
-                    Row(
-                      children: [
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          onPressed: () {
-                            if (tempDays > 1) {
-                              tempDays--;
-                              setDialogState(() {});
-                            }
-                          },
-                          icon: Icon(Icons.remove_circle_outline, color: accent),
-                        ),
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          onPressed: () {
-                            if (tempDays < 365) {
-                              tempDays++;
-                              setDialogState(() {});
-                            }
-                          },
-                          icon: Icon(Icons.add_circle_outline, color: accent),
-                        ),
-                        const SizedBox(width: 12),
-                        Text(
-                          '$tempDays days',
-                          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 24),
                     Text(
                       'Reminder',
                       style: TextStyle(
@@ -1584,12 +1647,15 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                       contentPadding: EdgeInsets.zero,
                       activeThumbColor: accent,
                       activeTrackColor: accent.withValues(alpha: 0.4),
-                      title: const Text('Donation reminders', style: TextStyle(color: Colors.white)),
+                      title: const Text('Donation reminders',
+                          style: TextStyle(color: Colors.white)),
                       subtitle: Text(
                         'Schedules from the soonest eligibility across '
                         '${DonationType.values.map((t) => t.displayName).join(', ')}. '
                         'Notification text names the type when possible.',
-                        style: TextStyle(color: Colors.white.withValues(alpha: 0.7), fontSize: 12),
+                        style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.7),
+                            fontSize: 12),
                       ),
                       onChanged: (value) {
                         setDialogState(() {
@@ -1609,7 +1675,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                                 setDialogState(() {});
                               }
                             },
-                            icon: Icon(Icons.remove_circle_outline, color: accent, size: 22),
+                            icon: Icon(Icons.remove_circle_outline,
+                                color: accent, size: 22),
                           ),
                           IconButton(
                             visualDensity: VisualDensity.compact,
@@ -1619,18 +1686,24 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                                 setDialogState(() {});
                               }
                             },
-                            icon: Icon(Icons.add_circle_outline, color: accent, size: 22),
+                            icon: Icon(Icons.add_circle_outline,
+                                color: accent, size: 22),
                           ),
                           const SizedBox(width: 12),
                           Text(
                             '$tempReminderDaysBefore days before',
-                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white),
+                            style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.white),
                           ),
                         ],
                       ),
                       Text(
                         'Also schedules an advance reminder before your soonest eligible date.',
-                        style: TextStyle(color: Colors.white.withValues(alpha: 0.6), fontSize: 12),
+                        style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.6),
+                            fontSize: 12),
                       ),
                     ],
                     const SizedBox(height: 24),
@@ -1656,7 +1729,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                       contentPadding: EdgeInsets.zero,
                       activeThumbColor: accent,
                       activeTrackColor: accent.withValues(alpha: 0.4),
-                      title: const Text('Require PIN', style: TextStyle(color: Colors.white)),
+                      title: const Text('Require PIN',
+                          style: TextStyle(color: Colors.white)),
                       onChanged: (value) async {
                         if (value) {
                           final pin = await PinDialogs.promptNewPin(
@@ -1686,7 +1760,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                             if (!ctx.mounted) return;
                             setDialogState(() {});
                             ScaffoldMessenger.of(ctx).showSnackBar(
-                              const SnackBar(content: Text('PIN lock disabled')),
+                              const SnackBar(
+                                  content: Text('PIN lock disabled')),
                             );
                           } catch (_) {
                             if (!ctx.mounted) return;
@@ -1730,7 +1805,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                               );
                             }
                           },
-                          child: Text('Change PIN', style: TextStyle(color: accent)),
+                          child: Text('Change PIN',
+                              style: TextStyle(color: accent)),
                         ),
                       ),
                       const SizedBox(height: 4),
@@ -1768,15 +1844,18 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                           ),
                         ),
                         items: [
-                          for (final seconds in AutoLockPolicy.allowedTimeoutSeconds)
+                          for (final seconds
+                              in AutoLockPolicy.allowedTimeoutSeconds)
                             DropdownMenuItem(
                               value: seconds,
-                              child: Text(AutoLockPolicy.labelForTimeout(seconds)),
+                              child:
+                                  Text(AutoLockPolicy.labelForTimeout(seconds)),
                             ),
                         ],
                         onChanged: (value) async {
                           if (value == null) return;
-                          await DonationStorage.setAutoLockTimeoutSeconds(value);
+                          await DonationStorage.setAutoLockTimeoutSeconds(
+                              value);
                           autoLockSeconds = value;
                           widget.onPinSettingsChanged?.call();
                           if (!ctx.mounted) return;
@@ -1806,10 +1885,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                       ListTile(
                         contentPadding: EdgeInsets.zero,
                         dense: true,
-                        leading: Icon(learnType.icon, color: learnType.accent, size: 22),
+                        leading: Icon(learnType.icon,
+                            color: learnType.accent, size: 22),
                         title: Text(
                           learnType.displayName,
-                          style: const TextStyle(color: Colors.white, fontSize: 14),
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 14),
                         ),
                         subtitle: Text(
                           learnType.journeyLabel,
@@ -1839,7 +1920,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                         Navigator.pop(ctx);
                         _showInfoSheet(DonationTypeInfo.centerRuleNotes);
                       },
-                      icon: Icon(Icons.local_hospital_outlined, size: 18, color: accent),
+                      icon: Icon(Icons.local_hospital_outlined,
+                          size: 18, color: accent),
                       label: Text(
                         'Center-specific rule notes',
                         style: TextStyle(color: accent),
@@ -1850,7 +1932,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                         Navigator.pop(ctx);
                         _showPfasInfo();
                       },
-                      icon: Icon(Icons.science_outlined, size: 18, color: accent),
+                      icon:
+                          Icon(Icons.science_outlined, size: 18, color: accent),
                       label: Text(
                         'About donation types / PFAS & toxins',
                         style: TextStyle(color: accent),
@@ -1890,7 +1973,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     Text(
                       'Export as plaintext JSON or PIN-protected (encrypted) backup. '
                       'PIN-protected files need the export PIN to import. '
-                      'Import still accepts older plaintext v1–v5 backups.',
+                      'Import still accepts older plaintext v1–v6 backups.',
                       style: TextStyle(
                         color: Colors.white.withValues(alpha: 0.55),
                         fontSize: 12,
@@ -1907,7 +1990,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                             label: const Text('Export JSON'),
                             style: OutlinedButton.styleFrom(
                               foregroundColor: Colors.white,
-                              side: BorderSide(color: Colors.white.withValues(alpha: 0.2)),
+                              side: BorderSide(
+                                  color: Colors.white.withValues(alpha: 0.2)),
                             ),
                           ),
                         ),
@@ -1919,7 +2003,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                             label: const Text('Import JSON'),
                             style: OutlinedButton.styleFrom(
                               foregroundColor: Colors.white,
-                              side: BorderSide(color: Colors.white.withValues(alpha: 0.2)),
+                              side: BorderSide(
+                                  color: Colors.white.withValues(alpha: 0.2)),
                             ),
                           ),
                         ),
@@ -1930,19 +2015,20 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               ),
             ),
             actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel')),
               TextButton(
                 onPressed: () async {
-                  await DonationStorage.setCountdownDays(tempDays, type);
                   await DonationStorage.setReminderEnabled(tempReminderEnabled);
-                  await DonationStorage.setReminderDaysBefore(tempReminderDaysBefore);
+                  await DonationStorage.setReminderDaysBefore(
+                      tempReminderDaysBefore);
                   await DonationStorage.setDonorNumber(donorController.text);
                   final savedDonor = await DonationStorage.getDonorNumber();
                   if (!ctx.mounted) return;
                   Navigator.pop(ctx);
                   if (!mounted) return;
                   setState(() {
-                    _countdownDays = tempDays;
                     _reminderEnabled = tempReminderEnabled;
                     _reminderDaysBefore = tempReminderDaysBefore;
                     _donorNumber = savedDonor;
@@ -1951,7 +2037,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     _maybeShowNotificationPermissionHint(true);
                   }
                 },
-                child: Text('Save', style: TextStyle(color: accent, fontWeight: FontWeight.w600)),
+                child: Text('Save',
+                    style:
+                        TextStyle(color: accent, fontWeight: FontWeight.w600)),
               ),
             ],
           );

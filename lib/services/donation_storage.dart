@@ -7,7 +7,9 @@ import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
 
+import '../models/donation_arm.dart';
 import '../models/donation_type.dart';
+import '../models/eligibility_matrix.dart';
 import '../models/export_schema.dart';
 import '../models/typed_donation.dart';
 import 'auto_lock_policy.dart';
@@ -105,21 +107,75 @@ class DonationStorage {
     return deduped;
   }
 
+  /// Parses an on-device string or an export value (ISO string, JSON string, or map).
+  @visibleForTesting
+  static DonationEntry? tryParseDonationValue(dynamic raw) {
+    if (raw is Map) {
+      final dateRaw = raw['date'];
+      if (dateRaw is! String) return null;
+      try {
+        return DonationEntry(
+          date: dateOnly(DateTime.parse(dateRaw)),
+          arm: DonationArm.tryFromId(raw['arm']),
+        );
+      } catch (_) {
+        return null;
+      }
+    }
+    if (raw is! String) return null;
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    if (trimmed.startsWith('{')) {
+      try {
+        return tryParseDonationValue(jsonDecode(trimmed));
+      } catch (_) {
+        return null;
+      }
+    }
+    try {
+      return DonationEntry(date: dateOnly(DateTime.parse(trimmed)));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// On-device list value: ISO date when untagged, JSON object when an arm is set.
+  @visibleForTesting
+  static String encodeDonationEntry(DonationEntry entry) {
+    final iso = dateOnly(entry.date).toIso8601String();
+    final arm = entry.arm;
+    if (arm == null) return iso;
+    return jsonEncode({'date': iso, 'arm': arm.id});
+  }
+
+  /// Export list value: ISO string when untagged, map when an arm is set.
+  @visibleForTesting
+  static dynamic toExportDonationValue(DonationEntry entry) {
+    final iso = dateOnly(entry.date).toIso8601String();
+    final arm = entry.arm;
+    if (arm == null) return iso;
+    return {'date': iso, 'arm': arm.id};
+  }
+
+  @visibleForTesting
+  static List<DonationEntry> parseAndDedupeEntries(Iterable<dynamic> raw) {
+    final byDate = <DateTime, DonationEntry>{};
+    for (final value in raw) {
+      final entry = tryParseDonationValue(value);
+      if (entry == null) continue;
+      final existing = byDate[entry.date];
+      if (existing == null || (existing.arm == null && entry.arm != null)) {
+        byDate[entry.date] = entry;
+      }
+    }
+    final entries = byDate.values.toList()
+      ..sort((a, b) => b.date.compareTo(a.date));
+    return entries;
+  }
+
   @visibleForTesting
   static List<String> dedupeDonationStrings(List<String> isoStrings) {
-    final dates = isoStrings
-        .map((entry) {
-          try {
-            return dateOnly(DateTime.parse(entry));
-          } catch (_) {
-            return null;
-          }
-        })
-        .whereType<DateTime>()
-        .toList();
-    return dedupeDonationDates(dates)
-        .map((date) => date.toIso8601String())
-        .toList();
+    return parseAndDedupeEntries(isoStrings).map(encodeDonationEntry).toList();
   }
 
   static Future<DonationType> getActiveDonationType() async {
@@ -241,59 +297,89 @@ class DonationStorage {
   }
 
   static Future<_EligibilityCandidate?> _soonestEligibilityCandidate() async {
-    _EligibilityCandidate? soonest;
-    for (final type in DonationType.values) {
-      final donations = await getDonations(type);
-      if (donations.isEmpty) continue;
-      final countdown = await _store.getInt(type.countdownPrefsKey) ??
-          type.defaultCountdownDays;
-      final eligible =
-          dateOnly(donations.first).add(Duration(days: countdown));
-      if (soonest == null || eligible.isBefore(soonest.eligibleDate)) {
-        soonest = _EligibilityCandidate(
-          type: type,
-          eligibleDate: eligible,
-          countdownDays: countdown,
-        );
-      }
-    }
-    return soonest;
+    final snapshot = await getEligibilitySnapshot();
+    if (!snapshot.hasHistory || snapshot.soonestType == null) return null;
+    final row = snapshot.row(snapshot.soonestType!);
+    return _EligibilityCandidate(
+      type: row.type,
+      eligibleDate: row.nextEligible!,
+      countdownDays: row.appliedWaitDays,
+    );
   }
 
   static Future<List<DateTime>> getDonations([DonationType? type]) async {
+    final records = await getDonationRecords(type);
+    return records.map((e) => e.date).toList();
+  }
+
+  /// Donations for [type] with optional arm tags, newest first.
+  static Future<List<DonationEntry>> getDonationRecords([
+    DonationType? type,
+  ]) async {
     final resolved = type ?? await getActiveDonationType();
     final list = await _store.getStringList(resolved.donationsPrefsKey);
     if (list == null) return [];
 
-    final dedupedStrings = dedupeDonationStrings(list);
-    if (dedupedStrings.length != list.length) {
-      await _store.setStringList(resolved.donationsPrefsKey, dedupedStrings);
+    final entries = parseAndDedupeEntries(list);
+    final encoded = entries.map(encodeDonationEntry).toList();
+    if (encoded.length != list.length) {
+      await _store.setStringList(resolved.donationsPrefsKey, encoded);
     }
 
-    return dedupeDonationDates(
-      dedupedStrings.map((entry) => dateOnly(DateTime.parse(entry))).toList(),
-    );
+    return entries;
   }
 
-  static Future<void> addDonation(DateTime date, [DonationType? type]) async {
-    final resolved = type ?? await getActiveDonationType();
-    final list =
-        await _store.getStringList(resolved.donationsPrefsKey) ?? [];
-    final normalized = dateOnly(date);
-    final alreadyExists = list.any((entry) {
-      try {
-        return dateOnly(DateTime.parse(entry)) == normalized;
-      } catch (_) {
-        return false;
-      }
-    });
-    if (alreadyExists) return;
+  /// Most recent L or R tag for [type] (skips dual-needle "Both").
+  static Future<DonationArm?> lastTaggedSingleArm([DonationType? type]) async {
+    final records = await getDonationRecords(type);
+    for (final record in records) {
+      final arm = record.arm;
+      if (arm != null && arm.isSingleNeedle) return arm;
+    }
+    return null;
+  }
 
-    list.add(normalized.toIso8601String());
-    await _store.setStringList(resolved.donationsPrefsKey, list);
+  static Future<void> addDonation(
+    DateTime date, {
+    DonationType? type,
+    DonationArm? arm,
+  }) async {
+    final resolved = type ?? await getActiveDonationType();
+    final list = await _store.getStringList(resolved.donationsPrefsKey) ?? [];
+    final entries = parseAndDedupeEntries(list);
+    final normalized = dateOnly(date);
+    if (entries.any((entry) => entry.date == normalized)) return;
+
+    entries.add(DonationEntry(date: normalized, arm: arm));
+    entries.sort((a, b) => b.date.compareTo(a.date));
+    await _store.setStringList(
+      resolved.donationsPrefsKey,
+      entries.map(encodeDonationEntry).toList(),
+    );
     await _rescheduleNotifications();
   }
 
+  /// Sets or clears the arm tag on an existing donation (same calendar day).
+  static Future<void> updateDonationArm({
+    required DateTime date,
+    required DonationType type,
+    DonationArm? arm,
+  }) async {
+    final list = await _store.getStringList(type.donationsPrefsKey) ?? [];
+    final entries = parseAndDedupeEntries(list);
+    final normalized = dateOnly(date);
+    final index = entries.indexWhere((entry) => entry.date == normalized);
+    if (index < 0) return;
+
+    entries[index] = DonationEntry(date: normalized, arm: arm);
+    await _store.setStringList(
+      type.donationsPrefsKey,
+      entries.map(encodeDonationEntry).toList(),
+    );
+  }
+
+  /// Stored per-type days for backup round-trip only. Eligibility uses the
+  /// fixed wait matrix and ignores these values.
   static Future<int> getCountdownDays([DonationType? type]) async {
     final resolved = type ?? await getActiveDonationType();
     return await _store.getInt(resolved.countdownPrefsKey) ??
@@ -324,23 +410,20 @@ class DonationStorage {
     await _rescheduleNotifications();
   }
 
-  static Future<void> removeDonation(DateTime date, [DonationType? type]) async {
+  static Future<void> removeDonation(DateTime date,
+      [DonationType? type]) async {
     final resolved = type ?? await getActiveDonationType();
-    final list =
-        await _store.getStringList(resolved.donationsPrefsKey) ?? [];
+    final list = await _store.getStringList(resolved.donationsPrefsKey) ?? [];
     final normalized = dateOnly(date);
-    final index = list.indexWhere((entry) {
-      try {
-        return dateOnly(DateTime.parse(entry)) == normalized;
-      } catch (_) {
-        return false;
-      }
-    });
-    if (index >= 0) {
-      list.removeAt(index);
-      await _store.setStringList(resolved.donationsPrefsKey, list);
-      await _rescheduleNotifications();
-    }
+    final entries = parseAndDedupeEntries(list);
+    final next = entries.where((entry) => entry.date != normalized).toList();
+    if (next.length == entries.length) return;
+
+    await _store.setStringList(
+      resolved.donationsPrefsKey,
+      next.map(encodeDonationEntry).toList(),
+    );
+    await _rescheduleNotifications();
   }
 
   /// Optional donor ID / donor number. Empty string clears the value.
@@ -390,9 +473,13 @@ class DonationStorage {
   static Future<List<TypedDonation>> getCombinedDonations() async {
     final combined = <TypedDonation>[];
     for (final type in DonationType.values) {
-      final dates = await getDonations(type);
-      for (final date in dates) {
-        combined.add(TypedDonation(type: type, date: date));
+      final records = await getDonationRecords(type);
+      for (final record in records) {
+        combined.add(TypedDonation(
+          type: type,
+          date: record.date,
+          arm: record.arm,
+        ));
       }
     }
     combined.sort((a, b) {
@@ -403,37 +490,22 @@ class DonationStorage {
     return combined;
   }
 
-  /// Eligibility for every type using that type's countdown setting.
+  static Future<EligibilitySnapshot> getEligibilitySnapshot({
+    DateTime? now,
+  }) async {
+    final donations = await getCombinedDonations();
+    return EligibilityMatrix.evaluate(
+      donations: donations,
+      now: now,
+    );
+  }
+
+  /// Eligibility for every type using the cross-product wait matrix.
   static Future<List<TypeEligibility>> getEligibilityOverview({
     DateTime? now,
   }) async {
-    final today = dateOnly(now ?? DateTime.now());
-    final result = <TypeEligibility>[];
-
-    for (final type in DonationType.values) {
-      final donations = await getDonations(type);
-      final countdown = await _store.getInt(type.countdownPrefsKey) ??
-          type.defaultCountdownDays;
-
-      if (donations.isEmpty) {
-        result.add(TypeEligibility(type: type, countdownDays: countdown));
-        continue;
-      }
-
-      final last = dateOnly(donations.first);
-      final next = last.add(Duration(days: countdown));
-      final daysUntil = next.difference(today).inDays.clamp(0, 999);
-      result.add(
-        TypeEligibility(
-          type: type,
-          countdownDays: countdown,
-          lastDonation: last,
-          nextEligible: next,
-          daysUntil: daysUntil,
-        ),
-      );
-    }
-    return result;
+    final snapshot = await getEligibilitySnapshot(now: now);
+    return snapshot.rows;
   }
 
   static Future<void> initNotifications() async {
@@ -452,8 +524,8 @@ class DonationStorage {
     const initSettings = InitializationSettings(android: androidSettings);
     await _notificationsPlugin.initialize(settings: initSettings);
 
-    final androidPlugin = _notificationsPlugin
-        .resolvePlatformSpecificImplementation<
+    final androidPlugin =
+        _notificationsPlugin.resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>();
     await androidPlugin?.createNotificationChannel(
       const AndroidNotificationChannel(
@@ -559,8 +631,7 @@ class DonationStorage {
     const androidDetails = AndroidNotificationDetails(
       'donation_reminders',
       'Donation Reminders',
-      channelDescription:
-          'Scheduled reminders for blood donation eligibility',
+      channelDescription: 'Scheduled reminders for blood donation eligibility',
       importance: Importance.high,
       priority: Priority.high,
     );
@@ -586,8 +657,7 @@ class DonationStorage {
     const androidDetails = AndroidNotificationDetails(
       'donation_reminders',
       'Donation Reminders',
-      channelDescription:
-          'Scheduled reminders for blood donation eligibility',
+      channelDescription: 'Scheduled reminders for blood donation eligibility',
       importance: Importance.high,
       priority: Priority.high,
     );
@@ -601,7 +671,7 @@ class DonationStorage {
     );
   }
 
-  /// Builds the plaintext export map (schema v5) without writing a file.
+  /// Builds the plaintext export map (schema v6) without writing a file.
   @visibleForTesting
   static Future<Map<String, dynamic>> buildExportMap() async {
     final snapshot = await _store.exportSnapshot();
@@ -620,22 +690,20 @@ class DonationStorage {
 
     for (final type in DonationType.values) {
       final raw = snapshot[type.donationsPrefsKey];
-      final list = raw is List
-          ? dedupeDonationStrings(
-              raw.map((e) => e.toString()).toList(),
-            )
-          : <String>[];
-      data[type.donationsPrefsKey] = list;
+      final entries =
+          raw is List ? parseAndDedupeEntries(raw) : <DonationEntry>[];
+      data[type.donationsPrefsKey] = [
+        for (final entry in entries) toExportDonationValue(entry),
+      ];
       final countdown = snapshot[type.countdownPrefsKey];
-      data[type.countdownPrefsKey] = countdown is int
-          ? countdown
-          : type.defaultCountdownDays;
+      data[type.countdownPrefsKey] =
+          countdown is int ? countdown : type.defaultCountdownDays;
     }
     return data;
   }
 
   /// Export backup. Pass [passphrase] for PIN-protected (`enc_export_v1`) export;
-  /// omit for plaintext JSON (schema v5).
+  /// omit for plaintext JSON (schema v6).
   static Future<ExportResult> exportData({String? passphrase}) async {
     try {
       final data = await buildExportMap();
@@ -724,7 +792,7 @@ class DonationStorage {
     return _validateImportMap(decoded);
   }
 
-  /// Decrypt a PIN-protected envelope and run the same v1–v5 validation.
+  /// Decrypt a PIN-protected envelope and run the same v1–v6 validation.
   /// Wrong passphrase returns a failure — never wipes on-device data.
   static ImportResult decryptAndValidateImport({
     required Map<String, dynamic> encryptedEnvelope,
@@ -787,14 +855,12 @@ class DonationStorage {
         }
         final donations = <String>[];
         for (final entry in rawDonations) {
-          if (entry is! String) continue;
-          try {
-            donations.add(dateOnly(DateTime.parse(entry)).toIso8601String());
-          } catch (_) {
-            // Skip invalid donation dates.
-          }
+          final parsed = tryParseDonationValue(entry);
+          if (parsed == null) continue;
+          donations.add(encodeDonationEntry(parsed));
         }
-        validated[key] = dedupeDonationStrings(donations);
+        validated[key] =
+            parseAndDedupeEntries(donations).map(encodeDonationEntry).toList();
       }
 
       final countdownKey = type.countdownPrefsKey;
@@ -872,7 +938,7 @@ class DonationStorage {
       for (final type in DonationType.values) {
         final raw = data[type.donationsPrefsKey];
         final list = raw is List
-            ? dedupeDonationStrings(List<String>.from(raw))
+            ? parseAndDedupeEntries(raw).map(encodeDonationEntry).toList()
             : <String>[];
         updates[type.donationsPrefsKey] = list;
       }

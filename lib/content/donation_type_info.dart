@@ -115,6 +115,14 @@ class DonationTypeInfo {
     body:
         'Donation centers set their own eligibility. This app does not enforce medical rules — '
         'always check with your center.\n\n'
+        'Cross-type waits\n'
+        '• The eligibility matrix uses your last donation (and any older visit that still '
+        'blocks a product). After whole blood: 56 days for whole blood, plasma, and double red, '
+        'and 7 days for platelets. After plasma: 28 days for whole blood, plasma, and double red, '
+        'and 7 days for platelets. After platelets: 7 days for every type (up to 24 platelet '
+        'donations a year). After double red: 112 days for every type.\n'
+        '• Yearly caps in this app are 6 whole blood, 13 plasma, 24 platelet, and 3 double red '
+        'donations in a rolling 12 months. Centers may differ.\n\n'
         'Platelets\n'
         '• Many centers restrict aspirin (and similar medications) for a period before platelet '
         'donation (often ~48 hours). Confirm the exact window with your center.\n\n'
@@ -140,8 +148,7 @@ class DonationTypeInfo {
   /// PFAS / toxins overview — linked from Settings so Home stays uncluttered.
   static const pfasAndToxins = DonationTypeInfo(
     title: 'About donation types / PFAS & toxins',
-    body:
-        'Removal of “forever chemicals” (PFAS)\n\n'
+    body: 'Removal of “forever chemicals” (PFAS)\n\n'
         'The most significant evidence for toxin removal involves Per- and Polyfluoroalkyl Substances '
         '(PFAS), known as “forever chemicals” due to their persistence in the environment and the '
         'human body. A landmark clinical trial involving Australian firefighters found that regular '

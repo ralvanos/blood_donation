@@ -26,7 +26,7 @@ enum DonationType {
         DonationType.doubleRed => 'donations_double_red',
       };
 
-  /// Per-type countdown override. Whole blood keeps legacy `countdown_days`.
+  /// Backup key for unused countdown prefs. Whole blood keeps legacy `countdown_days`.
   String get countdownPrefsKey => switch (this) {
         DonationType.wholeBlood => 'countdown_days',
         DonationType.plasma => 'countdown_days_plasma',
@@ -67,7 +67,8 @@ enum DonationType {
   /// Soft donor-journey guidance (not an unlock gate).
   String get journeyLabel => switch (this) {
         DonationType.wholeBlood => 'Start here / New donor',
-        DonationType.plasma || DonationType.platelet =>
+        DonationType.plasma ||
+        DonationType.platelet =>
           'Frequent / Maximize impact',
         DonationType.doubleRed => 'Advanced / High impact',
       };
@@ -78,21 +79,6 @@ enum DonationType {
         DonationType.platelet =>
           '~$mlPerDonation ml platelet concentrate (approx.)',
         DonationType.doubleRed => '~$mlPerDonation ml RBC (2 units)',
-      };
-
-  String get settingsIntervalBlurb => switch (this) {
-        DonationType.wholeBlood =>
-          'Most places require around $defaultCountdownDays days between whole blood donations. '
-              'This setting applies to the active type ($displayName).',
-        DonationType.plasma =>
-          'Plasma donations are often allowed about every $defaultCountdownDays days (~4 weeks). '
-              'This setting applies to the active type ($displayName).',
-        DonationType.platelet =>
-          'Platelet donations are often allowed about every $defaultCountdownDays days '
-              '(up to ~24 times a year). This setting applies to the active type ($displayName).',
-        DonationType.doubleRed =>
-          'Double Red (Power Red) typically requires about $defaultCountdownDays days (~16 weeks) between donations. '
-              'This setting applies to the active type ($displayName).',
       };
 
   /// Primary accent for charts, FAB, ring, cards, and selected segments.
@@ -134,8 +120,7 @@ enum DonationType {
       };
 
   /// Foreground on solid accent backgrounds (FAB, selected chips).
-  Color get onAccent =>
-      accentIsLight ? const Color(0xFF1A1208) : Colors.white;
+  Color get onAccent => accentIsLight ? const Color(0xFF1A1208) : Colors.white;
 
   /// Chart area fill opacity — plasma/platelet get a softer translucent/cloudy look.
   double get chartFillOpacity => switch (this) {
@@ -149,6 +134,25 @@ enum DonationType {
         DonationType.plasma => Icons.water_drop_rounded,
         DonationType.platelet => Icons.bubble_chart_rounded,
         DonationType.doubleRed => Icons.opacity_rounded,
+      };
+
+  /// Typical setup — guidance only; centers and machines vary.
+  bool get typicallyDualNeedle => this == DonationType.platelet;
+
+  /// Short copy for the arm picker (not medical advice).
+  String get needleGuidance => switch (this) {
+        DonationType.wholeBlood =>
+          'Whole blood uses a single needle. Alternating arms can help reduce '
+              'venous fibrosis from repeated sticks.',
+        DonationType.plasma =>
+          'Plasma is typically a single needle — blood goes out and back through '
+              'the same arm.',
+        DonationType.platelet =>
+          'Platelets often use two needles (one in each arm), depending on the '
+              'machine. Some centers use a single needle.',
+        DonationType.doubleRed =>
+          'Double Red is typically a single needle — blood goes out and back '
+              'through the same arm.',
       };
 
   static DonationType fromId(String? id) {
